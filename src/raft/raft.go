@@ -20,8 +20,8 @@ package raft
 import "sync"
 import "labrpc"
 
-// import "bytes"
-// import "encoding/gob"
+import "bytes"
+import "encoding/gob"
 
 
 
@@ -37,6 +37,18 @@ type ApplyMsg struct {
 	Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
+type RaftState int
+const (
+    FOLLOWER RaftState = iota
+    LEADER
+    CANDIDATE
+)
+
+type LogEntry struct {
+    Term    int
+    Command interface{}
+}
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -49,7 +61,11 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
+    state          RaftState
+    currentTerm    int
+    votedFor       int
+    logs           []LogEntry
+    voteCount      int
 }
 
 // return currentTerm and whether this server
@@ -59,6 +75,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here.
+    term = rf.currentTerm
+    isleader = rf.state == LEADER
 	return term, isleader
 }
 
@@ -76,6 +94,13 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// data := w.Bytes()
 	// rf.persister.SaveRaftState(data)
+    w := new(bytes.Buffer)
+    e := gob.NewEncoder(w)
+    e.Encode(rf.currentTerm)
+    e.Encode(rf.votedFor)
+    e.Encode(rf.logs)
+    data := w.Bytes()
+    rf.persister.SaveRaftState(data)
 }
 
 //
@@ -88,6 +113,11 @@ func (rf *Raft) readPersist(data []byte) {
 	// d := gob.NewDecoder(r)
 	// d.Decode(&rf.xxx)
 	// d.Decode(&rf.yyy)
+    r := bytes.NewBuffer(data)
+    d := gob.NewDecoder(r)
+    d.Decode(&rf.currentTerm)
+    d.Decode(&rf.votedFor)
+    d.Decode(&rf.logs)
 }
 
 
@@ -98,6 +128,10 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
 	// Your data here.
+    Term         int
+    CandidateId  int
+    LastLogIndex int
+    LastLogTerm  int
 }
 
 //
@@ -105,6 +139,19 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
 	// Your data here.
+    Term        int
+    VoteGranted bool
+}
+
+func (rf *Raft) become(state RaftState) {
+    rf.state = state
+    if state == FOLLOWER {
+        rf.votedFor = -1
+    } else if state == CANDIDATE {
+        rf.currentTerm++
+        rf.votedFor = rf.me
+        rf.voteCount = 1
+    }
 }
 
 //
@@ -112,6 +159,49 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here.
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    // 如果候选人任期小于接收者任期，则拒绝投票
+    if args.Term < rf.currentTerm {
+        reply.Term = rf.currentTerm
+        reply.VoteGranted = false
+        return
+    }
+    // 如果候选人任期大于接收者任期，则接收者更新任期，并转换为跟随者
+    if args.Term > rf.currentTerm {
+        rf.currentTerm = args.Term
+        rf.become(FOLLOWER)
+    }
+    // 如果已经给当前任期的其他候选人投过票，则拒绝投票
+    if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
+        reply.Term = rf.currentTerm
+        reply.VoteGranted = false
+        return
+    }
+    // 如果候选人日志比接收者旧，则拒绝投票
+    t1, t2 := rf.lastLogTerm(), args.LastLogTerm
+    i1, i2 := rf.lastLogIndex(), args.LastLogIndex
+    if t1 > t2 || (t1 == t2 && i1 > i2) {
+        reply.Term = rf.currentTerm
+        reply.VoteGranted = false
+        return
+    }
+    // 投票给候选人
+    rf.votedFor = args.CandidateId
+    reply.Term = rf.currentTerm
+    reply.VoteGranted = true
+}
+
+func (rf* Raft) lastLogIndex() int {
+    return len(rf.logs) - 1
+}
+
+func (rf* Raft) lastLogTerm() int {
+    i := rf.lastLogIndex()
+    if i < 0 {
+        return 0
+    }
+    return rf.logs[i].Term
 }
 
 //
@@ -133,6 +223,26 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+    if ok && rf.state == CANDIDATE {
+        rf.mu.Lock()
+        defer rf.mu.Unlock()
+
+        // 如果当前任期小于接收者任期，则更新当前任期，并转换为跟随者
+        if rf.currentTerm < reply.Term {
+            rf.currentTerm = reply.Term
+            rf.become(FOLLOWER)
+            return ok
+        }
+
+        // 如果获得了投票，则增加投票数
+        if reply.VoteGranted {
+            rf.voteCount++
+            // 如果获得了多数投票，则转换为领导者
+            if rf.voteCount > len(rf.peers) / 2 {
+                rf.become(LEADER)
+            }
+        }
+    }
 	return ok
 }
 
@@ -169,6 +279,26 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 }
 
+func (rf* Raft) startElection() {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    rf.become(CANDIDATE)
+    args := RequestVoteArgs{
+        Term: rf.currentTerm,
+        CandidateId: rf.me,
+        LastLogIndex: rf.lastLogIndex(),
+        LastLogTerm: rf.lastLogTerm(),
+    }
+    for i := range rf.peers {
+        if i != rf.me && rf.state == CANDIDATE {
+            go func(i int) {
+                var reply RequestVoteReply
+                rf.sendRequestVote(i, args, &reply)
+            }(i)
+        }
+    }
+}
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -188,6 +318,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here.
+    rf.currentTerm = 0
+    rf.become(FOLLOWER)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
