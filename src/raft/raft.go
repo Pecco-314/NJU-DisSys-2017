@@ -76,6 +76,7 @@ type Raft struct {
     applyCh           chan ApplyMsg
     matchIndex        []int
     nextIndex         []int
+    nextDec           []int
     electionLoopDone  chan bool
     heartbeatLoopDone chan bool
     electionTicker    *time.Ticker
@@ -171,9 +172,11 @@ func (rf *Raft) become(state RaftState) {
     } else if state == LEADER {
         rf.matchIndex = make([]int, len(rf.peers))
         rf.nextIndex = make([]int, len(rf.peers))
+        rf.nextDec = make([]int, len(rf.peers))
         for i := range rf.peers {
             rf.matchIndex[i] = -1
             rf.nextIndex[i] = len(rf.logs)
+            rf.nextDec[i] = 1
         }
         rf.matchIndex[rf.me] = len(rf.logs) - 1
         rf.resetHeartbeatTicker()
@@ -356,6 +359,7 @@ func (rf *Raft) sendAppendEntriesTooAll() {
                         newMatchIndex := args.PrevLogIndex + len(args.Entries)
                         rf.matchIndex[i] = newMatchIndex
                         rf.nextIndex[i] = newMatchIndex + 1
+                        rf.nextDec[i] = 1
                         // 统计有多少服务器复制了该日志条目
                         cnt := 0
                         for _, index := range rf.matchIndex {
@@ -369,7 +373,8 @@ func (rf *Raft) sendAppendEntriesTooAll() {
                         }
                     } else {
                         // 如果追加日志失败，则递减nextIndex，重新尝试追加日志
-                        rf.nextIndex[i] = max(1, rf.nextIndex[i] - 1)
+                        rf.nextIndex[i] = max(1, rf.nextIndex[i] - rf.nextDec[i])
+                        rf.nextDec[i] *= 2
                     }
                     rf.mu.Unlock()
                 }
