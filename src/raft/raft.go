@@ -531,6 +531,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here.
     rf.currentTerm = 0
+    rf.commitIndex = -1
+    rf.applyCh = applyCh
     rf.electionLoopDone = make(chan bool)
     rf.heartbeatLoopDone = make(chan bool)
 
