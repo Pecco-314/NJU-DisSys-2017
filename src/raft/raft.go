@@ -175,6 +175,7 @@ func (rf *Raft) become(state RaftState) {
             rf.matchIndex[i] = -1
             rf.nextIndex[i] = len(rf.logs)
         }
+        rf.matchIndex[rf.me] = len(rf.logs) - 1
         rf.resetHeartbeatTicker()
         rf.stopElectionTicker()
     }
