@@ -284,17 +284,20 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
         return
     }
     // 如果已经存在的日志条目和新的冲突（索引值相同但是任期号不同），则删除这一条和之后所有的条目，然后追加新的日志条目
-    for i, entry := range args.Entries {
-        index := args.PrevLogIndex + i + 1
-        if index >= len(rf.logs) {
-            rf.logs = append(rf.logs, args.Entries[i:]...)
-            break
-        }
+    index := args.PrevLogIndex + 1
+    for _, entry := range args.Entries {
         if rf.logs[index].Term != entry.Term {
-            rf.logs = append(rf.logs[:index], args.Entries[i:]...)
             break
         }
+        index++
     }
+    if index <= rf.lastLogIndex() {
+        rf.logs = rf.logs[:index]
+    }
+    rf.logs = append(rf.logs, args.Entries...)
+    reply.Term = rf.currentTerm
+    reply.Success = true
+
     // 如果领导者的提交索引大于接收者的提交索引，则更新接收者的提交索引为领导者的提交索引和接收者最后一条日志索引中较小的一个
     if args.LeaderCommit > rf.commitIndex {
         rf.commit(min(args.LeaderCommit, rf.lastLogIndex()))
