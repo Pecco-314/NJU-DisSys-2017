@@ -362,8 +362,20 @@ func (rf *Raft) sendAppendEntriesTooAll() {
                     }
                     if reply.Success {
                         // 如果追加日志成功，则更新matchIndex和nextIndex
-                        rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
-                        rf.nextIndex[i] = rf.matchIndex[i] + 1
+                        newMatchIndex := args.PrevLogIndex + len(args.Entries)
+                        rf.matchIndex[i] = newMatchIndex
+                        rf.nextIndex[i] = newMatchIndex + 1
+                        // 统计有多少服务器复制了该日志条目
+                        cnt := 0
+                        for _, index := range rf.matchIndex {
+                            if newMatchIndex <= index {
+                                cnt++
+                            }
+                        }
+                        // 如果大多数服务器都已经复制了日志条目，则提交该日志条目
+                        if cnt > len(rf.peers) / 2 {
+                            rf.commit(newMatchIndex)
+                        }
                     } else {
                         // 如果追加日志失败，则递减nextIndex，重新尝试追加日志
                         rf.nextIndex[i] = max(1, rf.nextIndex[i] - 1)
