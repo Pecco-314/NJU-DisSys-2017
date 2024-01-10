@@ -307,19 +307,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
         reply.Success = false
         return
     }
-    // 如果已经存在的日志条目和新的冲突（索引值相同但是任期号不同），则删除这一条和之后所有的条目，然后追加新的日志条目
-    index := args.PrevLogIndex + 1
-    for _, entry := range args.Entries {
-        if index >= len(rf.logs) || rf.logs[index].Term != entry.Term {
-            break
-        }
-        index++
-    }
-    if index <= rf.lastLogIndex() {
-        i := min(index, args.PrevLogIndex + 1)
-        rf.logs = rf.logs[:i]
-    }
-    rf.logs = append(rf.logs, args.Entries...)
+    rf.logs = append(rf.logs[:args.PrevLogIndex + 1], args.Entries...)
     reply.Term = rf.currentTerm
     reply.Success = true
 
