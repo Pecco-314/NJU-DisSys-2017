@@ -300,6 +300,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
         reply.Success = false
         return
     }
+    rf.resetElectionTicker()
     // 如果接收者日志在PrevLogIndex处的日志条目的任期号和PrevLogTerm不匹配，则拒绝追加日志
     if rf.termAt(args.PrevLogIndex) != args.PrevLogTerm {
         reply.Term = rf.currentTerm
@@ -309,13 +310,14 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
     // 如果已经存在的日志条目和新的冲突（索引值相同但是任期号不同），则删除这一条和之后所有的条目，然后追加新的日志条目
     index := args.PrevLogIndex + 1
     for _, entry := range args.Entries {
-        if rf.logs[index].Term != entry.Term {
+        if index >= len(rf.logs) || rf.logs[index].Term != entry.Term {
             break
         }
         index++
     }
     if index <= rf.lastLogIndex() {
-        rf.logs = rf.logs[:index]
+        i := min(index, args.PrevLogIndex + 1)
+        rf.logs = rf.logs[:i]
     }
     rf.logs = append(rf.logs, args.Entries...)
     reply.Term = rf.currentTerm
