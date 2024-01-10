@@ -66,6 +66,10 @@ type Raft struct {
     votedFor       int
     logs           []LogEntry
     voteCount      int
+    commitIndex    int
+    applyCh        chan ApplyMsg
+    matchIndex     []int
+    nextIndex      []int
 }
 
 // return currentTerm and whether this server
@@ -196,12 +200,16 @@ func (rf* Raft) lastLogIndex() int {
     return len(rf.logs) - 1
 }
 
-func (rf* Raft) lastLogTerm() int {
-    i := rf.lastLogIndex()
-    if i < 0 {
+func (rf* Raft) termAt(index int) int {
+    if index < 0 || index >= len(rf.logs) {
         return 0
+    } else {
+        return rf.logs[index].Term
     }
-    return rf.logs[i].Term
+}
+
+func (rf* Raft) lastLogTerm() int {
+    return rf.termAt(rf.lastLogIndex())
 }
 
 //
@@ -246,6 +254,98 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	return ok
 }
 
+type AppendEntriesArgs struct {
+    Term         int
+    LeaderId     int
+    PrevLogIndex int
+    PrevLogTerm  int
+    Entries      []LogEntry
+    LeaderCommit int
+}
+
+type AppendEntriesReply struct {
+    Term    int
+    Success bool
+}
+
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    // 如果领导者任期小于接收者任期，则拒绝追加日志
+    if args.Term < rf.currentTerm {
+        reply.Term = rf.currentTerm
+        reply.Success = false
+        return
+    }
+    // 如果接收者日志在PrevLogIndex处的日志条目的任期号和PrevLogTerm不匹配，则拒绝追加日志
+    if rf.termAt(args.PrevLogIndex) != args.PrevLogTerm {
+        reply.Term = rf.currentTerm
+        reply.Success = false
+        return
+    }
+    // 如果已经存在的日志条目和新的冲突（索引值相同但是任期号不同），则删除这一条和之后所有的条目，然后追加新的日志条目
+    for i, entry := range args.Entries {
+        index := args.PrevLogIndex + i + 1
+        if index >= len(rf.logs) {
+            rf.logs = append(rf.logs, args.Entries[i:]...)
+            break
+        }
+        if rf.logs[index].Term != entry.Term {
+            rf.logs = append(rf.logs[:index], args.Entries[i:]...)
+            break
+        }
+    }
+    // 如果领导者的提交索引大于接收者的提交索引，则更新接收者的提交索引为领导者的提交索引和接收者最后一条日志索引中较小的一个
+    if args.LeaderCommit > rf.commitIndex {
+        rf.commit(min(args.LeaderCommit, rf.lastLogIndex()))
+    }
+}
+
+func (rf *Raft) commit(index int) {
+    for i := rf.commitIndex + 1; i <= index; i++ {
+        msg := ApplyMsg{
+            Index:   i,
+            Command: rf.logs[i].Command,
+        }
+        rf.applyCh <- msg
+    }
+    rf.commitIndex = index
+}
+
+func (rf *Raft) sendAppendEntriesTooAll(entries []LogEntry) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    for i := range rf.peers {
+        if i != rf.me && rf.state == LEADER {
+            go func(i int) {
+                rf.mu.Lock()
+                var reply AppendEntriesReply
+                args := AppendEntriesArgs{
+                    Term:         rf.currentTerm,
+                    LeaderId:     rf.me,
+                    PrevLogIndex: rf.nextIndex[i] - 1,
+                    PrevLogTerm:  rf.termAt(rf.nextIndex[i] - 1),
+                    Entries:      entries,
+                    LeaderCommit: rf.commitIndex,
+                }
+                rf.mu.Unlock()
+                ok := rf.peers[i].Call("Raft.AppendEntries", args, &reply)
+                if ok {
+                    rf.mu.Lock()
+                    if reply.Success {
+                        // 如果追加日志成功，则更新matchIndex和nextIndex
+                        rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
+                        rf.nextIndex[i] = rf.matchIndex[i] + 1
+                    } else {
+                        // 如果追加日志失败，则递减nextIndex，重新尝试追加日志
+                        rf.nextIndex[i] = max(1, rf.nextIndex[i] - 1)
+                    }
+                    rf.mu.Unlock()
+                }
+            }(i)
+        }
+    }
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
