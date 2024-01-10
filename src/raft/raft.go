@@ -329,7 +329,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 func (rf *Raft) commit(index int) {
     for i := rf.commitIndex + 1; i <= index; i++ {
         msg := ApplyMsg{
-            Index:   i,
+            Index:   i + 1,
             Command: rf.logs[i].Command,
         }
         rf.applyCh <- msg
