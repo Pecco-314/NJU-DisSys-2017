@@ -337,9 +337,7 @@ func (rf *Raft) commit(index int) {
     rf.commitIndex = index
 }
 
-func (rf *Raft) sendAppendEntriesTooAll(entries []LogEntry) {
-    rf.mu.Lock()
-    defer rf.mu.Unlock()
+func (rf *Raft) sendAppendEntriesTooAll() {
     for i := range rf.peers {
         if i != rf.me && rf.state == LEADER {
             go func(i int) {
@@ -350,7 +348,7 @@ func (rf *Raft) sendAppendEntriesTooAll(entries []LogEntry) {
                     LeaderId:     rf.me,
                     PrevLogIndex: rf.nextIndex[i] - 1,
                     PrevLogTerm:  rf.termAt(rf.nextIndex[i] - 1),
-                    Entries:      entries,
+                    Entries:      rf.logs[rf.nextIndex[i]:],
                     LeaderCommit: rf.commitIndex,
                 }
                 rf.mu.Unlock()
@@ -391,12 +389,24 @@ func (rf *Raft) sendAppendEntriesTooAll(entries []LogEntry) {
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
+    defer rf.persist()
+    if rf.state != LEADER {
+        return -1, -1, false
+    }
+    rf.logs = append(rf.logs, LogEntry{
+        Term:    rf.currentTerm,
+        Command: command,
+    })
+    rf.nextIndex[rf.me] += 1
+    rf.matchIndex[rf.me] += 1
 
+    go rf.sendAppendEntriesTooAll()
 
-	return index, term, isLeader
+    index := rf.lastLogIndex()
+    term := rf.lastLogTerm()
+	return index + 1, term, true
 }
 
 //
@@ -435,7 +445,7 @@ func (rf* Raft) heartbeatLoop() {
     for {
         select {
         case <- rf.heartbeatTicker.C:
-            rf.sendAppendEntriesTooAll(nil)
+            rf.sendAppendEntriesTooAll()
         case <- rf.heartbeatLoopDone:
             return
         }
