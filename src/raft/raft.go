@@ -50,10 +50,10 @@ type LogEntry struct {
     Command interface{}
 }
 
-const HEARTBEAT_INTERVAL = 100 * time.Millisecond
+const HEARTBEAT_INTERVAL = 70 * time.Millisecond
 const CHECK_INTERVAL = 25 * time.Millisecond
-const MIN_ELECTION_TIMEOUT = 300 * time.Millisecond
-const MAX_ELECTION_TIMEOUT = 600 * time.Millisecond
+const MIN_ELECTION_TIMEOUT = 100 * time.Millisecond
+const MAX_ELECTION_TIMEOUT = 150 * time.Millisecond
 
 //
 // A Go object implementing a single Raft peer.
