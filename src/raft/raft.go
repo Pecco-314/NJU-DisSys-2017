@@ -22,7 +22,8 @@ import "labrpc"
 
 import "bytes"
 import "encoding/gob"
-
+import "time"
+import "math/rand"
 
 
 //
@@ -49,6 +50,11 @@ type LogEntry struct {
     Command interface{}
 }
 
+const HEARTBEAT_INTERVAL = 100 * time.Millisecond
+const CHECK_INTERVAL = 25 * time.Millisecond
+const MIN_ELECTION_TIMEOUT = 300 * time.Millisecond
+const MAX_ELECTION_TIMEOUT = 600 * time.Millisecond
+
 //
 // A Go object implementing a single Raft peer.
 //
@@ -61,15 +67,19 @@ type Raft struct {
 	// Your data here.
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-    state          RaftState
-    currentTerm    int
-    votedFor       int
-    logs           []LogEntry
-    voteCount      int
-    commitIndex    int
-    applyCh        chan ApplyMsg
-    matchIndex     []int
-    nextIndex      []int
+    state             RaftState
+    currentTerm       int
+    votedFor          int
+    logs              []LogEntry
+    voteCount         int
+    commitIndex       int
+    applyCh           chan ApplyMsg
+    matchIndex        []int
+    nextIndex         []int
+    electionLoopDone  chan bool
+    heartbeatLoopDone chan bool
+    electionTicker    *time.Ticker
+    heartbeatTicker   *time.Ticker
 }
 
 // return currentTerm and whether this server
@@ -151,10 +161,22 @@ func (rf *Raft) become(state RaftState) {
     rf.state = state
     if state == FOLLOWER {
         rf.votedFor = -1
+        rf.stopHeartBeatTicker()
+        rf.resetElectionTicker()
     } else if state == CANDIDATE {
         rf.currentTerm++
         rf.votedFor = rf.me
         rf.voteCount = 1
+        go rf.startElection()
+    } else if state == LEADER {
+        rf.matchIndex = make([]int, len(rf.peers))
+        rf.nextIndex = make([]int, len(rf.peers))
+        for i := range rf.peers {
+            rf.matchIndex[i] = -1
+            rf.nextIndex[i] = len(rf.logs)
+        }
+        rf.resetHeartbeatTicker()
+        rf.stopElectionTicker()
     }
 }
 
@@ -335,6 +357,11 @@ func (rf *Raft) sendAppendEntriesTooAll(entries []LogEntry) {
                 ok := rf.peers[i].Call("Raft.AppendEntries", args, &reply)
                 if ok {
                     rf.mu.Lock()
+                    // 如果当前任期小于接收者任期，则更新当前任期，并转换为跟随者
+                    if rf.currentTerm < reply.Term {
+                        rf.currentTerm = reply.Term
+                        rf.become(FOLLOWER)
+                    }
                     if reply.Success {
                         // 如果追加日志成功，则更新matchIndex和nextIndex
                         rf.matchIndex[i] = args.PrevLogIndex + len(args.Entries)
@@ -380,12 +407,14 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
+    defer rf.persist()
+    rf.electionLoopDone <- true
+    rf.heartbeatLoopDone <- true
 }
 
 func (rf* Raft) startElection() {
     rf.mu.Lock()
     defer rf.mu.Unlock()
-    rf.become(CANDIDATE)
     args := RequestVoteArgs{
         Term: rf.currentTerm,
         CandidateId: rf.me,
@@ -400,6 +429,64 @@ func (rf* Raft) startElection() {
             }(i)
         }
     }
+}
+
+func (rf* Raft) heartbeatLoop() {
+    for {
+        select {
+        case <- rf.heartbeatTicker.C:
+            rf.sendAppendEntriesTooAll(nil)
+        case <- rf.heartbeatLoopDone:
+            return
+        }
+    }
+}
+
+func (rf* Raft) electionLoop() {
+    for {
+        select {
+        case <- rf.electionTicker.C:
+            rf.mu.Lock()
+            if rf.state == FOLLOWER || rf.state == CANDIDATE {
+                rf.become(CANDIDATE)
+            }
+            rf.mu.Unlock()
+        case <- rf.electionLoopDone:
+            return
+        }
+    }
+}
+
+func randomTimeout() time.Duration {
+    return time.Duration(rand.Int63n(int64(MAX_ELECTION_TIMEOUT - MIN_ELECTION_TIMEOUT))) + MIN_ELECTION_TIMEOUT
+}
+
+func (rf* Raft) resetElectionTicker() {
+    if rf.electionTicker == nil {
+        rf.electionTicker = time.NewTicker(randomTimeout())
+    }
+    rf.electionTicker.Reset(randomTimeout())
+}
+
+func (rf* Raft) resetHeartbeatTicker() {
+    if rf.heartbeatTicker == nil {
+        rf.heartbeatTicker = time.NewTicker(HEARTBEAT_INTERVAL)
+    }
+    rf.heartbeatTicker.Reset(HEARTBEAT_INTERVAL)
+}
+
+func (rf* Raft) stopElectionTicker() {
+    if rf.electionTicker == nil {
+        rf.electionTicker = time.NewTicker(randomTimeout())
+    }
+    rf.electionTicker.Stop()
+}
+
+func (rf* Raft) stopHeartBeatTicker() {
+    if rf.heartbeatTicker == nil {
+        rf.heartbeatTicker = time.NewTicker(HEARTBEAT_INTERVAL)
+    }
+    rf.heartbeatTicker.Stop()
 }
 
 //
@@ -422,7 +509,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here.
     rf.currentTerm = 0
+    rf.electionLoopDone = make(chan bool)
+    rf.heartbeatLoopDone = make(chan bool)
+
     rf.become(FOLLOWER)
+    go rf.heartbeatLoop()
+    go rf.electionLoop()
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
